@@ -12,7 +12,12 @@ import (
 
 func main() {
 	fmt.Println("Let's optimize stuff")
-	env.Set("KUBECONFIG_PATH","/Users/michael.sklyar/.kube/config")
+	kubCfgPath := env.Get("KUBECONFIG_PATH","")
+	if kubCfgPath == "" {
+		fmt.Println("KUBECONFIG_PATH not set, exiting")
+		return
+	}
+	
 	var err error
 
 	var kc *rest.Config
