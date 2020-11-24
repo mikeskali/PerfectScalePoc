@@ -2,12 +2,14 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/mikeskali/PerfectScalePoc/env"
 	"github.com/mikeskali/PerfectScalePoc/clustercache"
+	"github.com/mikeskali/PerfectScalePoc/env"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/kubernetes"
 )
 
 func main() {
@@ -43,19 +45,39 @@ func main() {
 	k8sCache := clustercache.NewKubernetesClusterCache(kubeClientset)
 	k8sCache.Run()
 
-	
-	// []*v1.Node
 	nodes := k8sCache.GetAllNodes()
+	
+	nodeGroups := make(map[string][]*v1.Node)
+
 	for _,node := range nodes {
 		fmt.Println(node.Name)
-		allocCpu := node.Status.Allocatable.Cpu()
-		allocMemory := node.Status.Allocatable.Memory()
-		capCpu := node.Status.Capacity.Cpu()
-		capMemory := node.Status.Capacity.Memory()
 		
-
-		fmt.Println("allocCPU: ", allocCpu, "allocMemory", allocMemory, "capCpu", capCpu, "capMemory", capMemory)
+		nodeLabels := make([]string, 0, len(node.Labels))
+		for k,v := range node.Labels {
+			nodeLabels = append(nodeLabels, k+":"+v)
+		}
+		nodeSignature := strings.Join(nodeLabels,",")
+		nodeGroups[nodeSignature] = append(nodeGroups[nodeSignature], node)
 	}
+
+	for sign, nodes := range nodeGroups {
+		fmt.Println("===== Node group: " + sign + " ======" )
+		
+		for _,node := range nodes {
+			allocCPU := node.Status.Allocatable.Cpu()
+			allocMemory := node.Status.Allocatable.Memory()
+			capCPU := node.Status.Capacity.Cpu()
+			capMemory := node.Status.Capacity.Memory()
+			// fmt.Printf("= *(%d ) ")
+			fmt.Println(" * Name: ",node.Name,", allocCPU: ", allocCPU, ", allocMemory", allocMemory, ", capCpu", capCPU, ", capMemory", capMemory)
+		}
+	}
+	
+	fmt.Println() 
+	fmt.Println()
+	fmt.Println()
+	fmt.Println()
+	fmt.Println()
 
 	pods := k8sCache.GetAllPods()
 
