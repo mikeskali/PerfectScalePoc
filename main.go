@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
-	"strings"
-	"strconv"
+	"crypto/md5"
+	"log"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/mikeskali/PerfectScalePoc/clustercache"
 	"github.com/mikeskali/PerfectScalePoc/env"
@@ -15,6 +19,8 @@ import (
 )
 
 var ignoreValues = []string{"kubernetes.io/hostname","topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone","logzio/az"}
+var shouldHash bool
+
 
 func main() {
 	fmt.Println("Let's optimize stuff")
@@ -23,6 +29,8 @@ func main() {
 		fmt.Println("KUBECONFIG_PATH not set, exiting")
 		return
 	}
+
+	shouldHash = env.GetBool("SHOULD_HASH",false)
 	
 	var err error
 
@@ -42,16 +50,22 @@ func main() {
 
 	kubeClientset, err := kubernetes.NewForConfig(kc)
 	if err != nil {
-		panic(err.Error())
+		log.Fatal(err.Error())
 	}
 
 	// Create Kubernetes Cluster Cache + Watchers
 	k8sCache := clustercache.NewKubernetesClusterCache(kubeClientset)
 	k8sCache.Run()
 
+	wd,err := os.Getwd()
+	if err != nil {
+		log.Fatal("Can't open working dir")
+	} else {
+		log.Printf("\nworking dir: %s\n\n", wd)
+	}
 	
 	
-	printNodeGroups(k8sCache)
+	nodes2groups := printNodeGroups(k8sCache)
 	fmt.Println()
 	fmt.Println()
 
@@ -64,33 +78,84 @@ func main() {
 	fmt.Println()
 
 	printDeployments(k8sCache)
-	
-	// TODO
-	// pods := k8sCache.GetAllPods()
 
-	// for _, pod := range pods {
-	// 	podNodeName := pod.Spec.NodeName
-
-	// 	var requestCpu int64 = 0
-	// 	var requestMemory int64 = 0
-		
-	// 	for _, container := range pod.Spec.Containers {
-	// 		rCPU, exists := container.Resources.Requests.Cpu().AsInt64()
-	// 		if exists {
-	// 			requestCpu = requestCpu + rCPU
-	// 		}
-
-	// 		rMem, exists := container.Resources.Requests.Memory().AsInt64()
-	// 		if exists {
-	// 			requestMemory = requestMemory + rMem
-	// 		}
-	// 	}
-
-	// 	fmt.Println("pod name: ", pod.Name, "Node: ", podNodeName, "reqCpu: ", requestCpu, "reqMem: ", requestMemory)
-	// }
+	printPods(k8sCache, nodes2groups)
 }
 
-func printNodeGroups(k8sCache clustercache.ClusterCache){
+func printPods(k8sCache clustercache.ClusterCache, node2group map[string]string){
+	podsCsv, err := os.Create("pods.csv")
+	defer podsCsv.Close()
+	podsRecords := [][]string{
+        {"pod_name","node_name","node_group","namespace","owner_kind","owner_name","req_cpu_milli_core", "req_mem_byte","limit_cpu_mili_core","limit_mem_bytes"},
+	}
+
+	for _,pod := range k8sCache.GetAllPods() {
+		var podReqCPU int64
+		var podReqMem int64
+		var podLimitCPU int64
+		var podLimitMem int64
+		for _, container := range pod.Spec.Containers{
+			val := container.Resources.Requests.Cpu().MilliValue()
+			podReqCPU += val
+			val = container.Resources.Requests.Memory().Value()
+			podReqMem += val
+			val = container.Resources.Limits.Cpu().MilliValue()
+			podLimitCPU += val
+			val = container.Resources.Limits.Memory().Value()
+			podLimitMem += val
+		}
+		
+		var ownerKinds []string
+		var ownerNames []string
+		for _,owner := range pod.OwnerReferences {
+			ownerKinds = append(ownerKinds, owner.Kind)
+			ownerNames = append(ownerNames, owner.Name)
+		}
+		
+		podName   := pod.Name
+		ownerName := strings.Join(ownerNames,"|")
+		
+		if shouldHash {
+			podName = fmt.Sprintf("%x",md5.Sum([]byte(podName)))
+			ownerName = fmt.Sprintf("%x",md5.Sum([]byte(ownerName)))
+		}
+		
+		
+		podsRecords = append(podsRecords, []string{
+			podName,
+			pod.Spec.NodeName,
+			node2group[pod.Spec.NodeName],
+			pod.Namespace,
+			strings.Join(ownerKinds,"|"),
+			ownerName,
+			strconv.FormatInt(podReqCPU,10),
+			strconv.FormatInt(podReqMem,10),
+			strconv.FormatInt(podLimitCPU,10),
+			strconv.FormatInt(podLimitMem,10),
+
+		})
+	}
+
+	writer := csv.NewWriter(podsCsv)
+	err = writer.WriteAll(podsRecords)
+	if err != nil{
+		log.Println("Failed writing pods csv")
+	}
+
+}
+
+func printNodeGroups(k8sCache clustercache.ClusterCache) map[string]string{
+	// initialize CSV file
+	nodeGroupsCsv, err := os.Create("node_groups.csv")
+	nodesCsv, err := os.Create("nodes.csv")
+
+	defer nodeGroupsCsv.Close()
+	defer nodesCsv.Close()
+
+	if err != nil {
+		log.Fatalln("failed to open node_groups.csv")
+	}
+
 	allNodes := k8sCache.GetAllNodes()
 	nodeGroups := make(map[string][]*v1.Node)
 	labelsStats := make(map[string]int)
@@ -109,12 +174,31 @@ func printNodeGroups(k8sCache clustercache.ClusterCache){
 	}
 
 	currGroup := 0
+
+	// var csv_records [][]string
+	groupNodesRecords := [][]string{
+        {"group_id", "number_of_nodes", "unique_labels", "ignore_labels"},
+	}
+	nodesRecords := [][]string{
+        {"group_id", "node_name", "taints", "cap_cpu_mili_core","cap_memory_byte", "alloc_cpu_mili_core", "alloc_bytes"},
+	}
+
+	node2group := make(map[string]string)
+
 	for _, nodes := range nodeGroups {
 		fmt.Println("===== Node group: " + strconv.Itoa(currGroup) + " ======" )
-		printLabels(nodes[0].Labels, labelsStats, len(allNodes))
+		ignoreLabels, uniqueLabels := printLabels(nodes[0].Labels, labelsStats, len(allNodes))
+
+		groupNodesRecords = append(groupNodesRecords, []string{strconv.Itoa(currGroup),
+															   strconv.Itoa(len(nodes)),
+															   strings.Join(uniqueLabels," | "),
+															   strings.Join(ignoreLabels," | "),
+															})
 
 		fmt.Println("Nodes:")
 		for _,node := range nodes {
+			node2group[node.Name] = strconv.Itoa(currGroup)
+			node.Status.Capacity.Pods()
 			allocCPU := node.Status.Allocatable.Cpu()
 			allocMemory := node.Status.Allocatable.Memory()
 			capCPU := node.Status.Capacity.Cpu()
@@ -127,9 +211,32 @@ func printNodeGroups(k8sCache clustercache.ClusterCache){
 				taintsNames = append(taintsNames, fmt.Sprintf("%s:%s(%s)", curr.Key, curr.Value, curr.Effect))
 			}
 			fmt.Println(" * Name: ",node.Name,", node taints: ", strings.Join(taintsNames,","),", allocCPU: ", allocCPU, ", allocMemory", allocMemory, ", capCpu", capCPU, ", capMemory", capMemory)
+			nodesRecords = append(nodesRecords, []string{
+				strconv.Itoa(currGroup),
+				node.Name, 
+				strings.Join(taintsNames,","), 
+				strconv.FormatInt(capCPU.MilliValue(),10), 
+				strconv.FormatInt(capMemory.Value(),10),
+				strconv.FormatInt(allocCPU.MilliValue(),10), 
+				strconv.FormatInt(allocMemory.Value(),10),
+				})
 		}
+		
 		currGroup++
 	}
+	ngw := csv.NewWriter(nodeGroupsCsv)
+	nw  := csv.NewWriter(nodesCsv)
+
+	err = ngw.WriteAll(groupNodesRecords)
+	if err != nil {
+		log.Println("Faild writing node groups CSV")
+	}
+	err = nw.WriteAll(nodesRecords)
+	if err != nil {
+		log.Println("Faild writing nodes CSV")
+	}
+
+	return node2group
 }
 
 func printDeployments(k8sCache clustercache.ClusterCache){
@@ -260,7 +367,7 @@ func contains(arr []string, str string) bool {
  }
 
 
-func printLabels(labels map[string]string, labelsStats map[string]int, numOfNodes int){
+func printLabels(labels map[string]string, labelsStats map[string]int, numOfNodes int) (ignoreLbls []string, uniqueLbls []string){
 	fmt.Println("labels:")
 	var keys []string
 	for k := range labels {
@@ -292,6 +399,8 @@ func printLabels(labels map[string]string, labelsStats map[string]int, numOfNode
 	for _,key := range uniqueLabels {
 		fmt.Println("    * ",key,":",labels[key])
 	}
+
+	return ignoreLabels, uniqueLabels
 }
 
 func getAffinity(affinity *v1.Affinity) (nodeAffinity, podAffinity, podAntiAffinity string){
