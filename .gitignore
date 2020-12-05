@@ -16,3 +16,5 @@
 node_groups.csv
 nodes.csv
 pods.csv
+PerfectScalePoc
+.vscode/launch.json
