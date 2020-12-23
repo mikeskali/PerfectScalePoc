@@ -1,0 +1,4 @@
+ortools==8.1.8487
+numpy==1.19.3
+pandas==1.1.5
+dataclasses==0.8
