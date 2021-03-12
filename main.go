@@ -180,7 +180,7 @@ func printNodeGroups(k8sCache clustercache.ClusterCache) map[string]string{
         {"group_id", "number_of_nodes", "unique_labels", "ignore_labels"},
 	}
 	nodesRecords := [][]string{
-        {"group_id", "node_name", "taints", "cap_cpu_mili_core","cap_memory_byte", "alloc_cpu_mili_core", "alloc_bytes"},
+        {"group_id", "node_name", "node_type","taints", "cap_cpu_mili_core","cap_memory_byte", "alloc_cpu_mili_core", "alloc_bytes"},
 	}
 
 	node2group := make(map[string]string)
@@ -211,9 +211,13 @@ func printNodeGroups(k8sCache clustercache.ClusterCache) map[string]string{
 				taintsNames = append(taintsNames, fmt.Sprintf("%s:%s(%s)", curr.Key, curr.Value, curr.Effect))
 			}
 			fmt.Println(" * Name: ",node.Name,", node taints: ", strings.Join(taintsNames,","),", allocCPU: ", allocCPU, ", allocMemory", allocMemory, ", capCpu", capCPU, ", capMemory", capMemory)
+			
+			nodeType, _ := getNodeType(node)
+			
 			nodesRecords = append(nodesRecords, []string{
 				strconv.Itoa(currGroup),
 				node.Name, 
+				nodeType,
 				strings.Join(taintsNames,","), 
 				strconv.FormatInt(capCPU.MilliValue(),10), 
 				strconv.FormatInt(capMemory.Value(),10),
@@ -237,6 +241,17 @@ func printNodeGroups(k8sCache clustercache.ClusterCache) map[string]string{
 	}
 
 	return node2group
+}
+
+func getNodeType(node *v1.Node) (string, error){
+	var nodeTypeLabels = []string{"beta.kubernetes.io/instance-type"}
+	
+	for labelKey,labelValue := range node.Labels {
+		if contains(nodeTypeLabels, labelKey) {
+			return labelValue, nil
+		}
+	}
+	return "n/a", fmt.Errorf("not_found")
 }
 
 func printDeployments(k8sCache clustercache.ClusterCache){
